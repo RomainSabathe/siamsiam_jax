@@ -1,6 +1,6 @@
 import os
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.5"
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 # os.environ["LD_LIBRARY_PATH"] = "/usr/local/cuda/lib64/"
 # os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 
@@ -46,19 +46,32 @@ def _forward(batch: Batch, is_training: bool) -> Dict[str, jnp.array]:
 
     feature_maps = backbone(images, is_training=is_training)
     embeddings = jnp.mean(feature_maps, axis=(1, 2))
-    representations, projector_monitor = projector(
-        feature_maps, is_training=is_training
-    )
+    representations, projector_monitor = projector(embeddings, is_training=is_training)
     predictions, predictor_monitor = predictor(representations, is_training=is_training)
 
     return {
         "z": representations,
         "p": predictions,
-        "z_monitor": projector_monitor,
-        "p_monitor": predictor_monitor,
+        "z_monitor": projector_monitor.mean(),
+        "p_monitor": predictor_monitor.mean(),
     }
 
+
 forward = hk.transform_with_state(_forward)
+
+
+def loss_fn(
+    params: hk.Params, state: hk.State, rng, batch1: Batch, batch2: Batch
+) -> jnp.float32:
+    rng1, rng2 = jax.random.split(rng)
+
+    out1, state = forward.apply(params, state, rng1, batch1, is_training=True)
+    out2, state = forward.apply(params, state, rng2, batch2, is_training=True)
+
+    p1, z1 = out1["p"], out1["z"]
+    p2, z2 = out2["p"], out2["z"]
+
+    return (cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0), state
 
 
 class Cifar10WrappedBatch:
@@ -582,26 +595,11 @@ def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
     lhs = lhs / jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True)
     rhs = rhs / jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True)
 
-    return -jnp.dot(lhs, rhs)
+    return -jnp.sum(lhs * rhs, axis=1).mean()
 
 
 def main():
     rng = jax.random.PRNGKey(42)
-
-    def _forward(batch):
-        images = batch["image"]
-        images = imagenet_preprocessing(images)
-
-        # return ResNet18(num_classes=10)(images, is_training)
-        network = ResNet18Sim()
-        feature_maps = network(images, is_training=True)
-        return jnp.mean(feature_maps, axis=(1, 2))
-
-    def _project(embeddings: jnp.array) -> jnp.array:
-        return Projector(nb_dims=2_048, nb_layers=2)(embeddings, is_training=True)
-
-    def _predict(representations: jnp.array) -> jnp.array:
-        return Predictor(hidden_dims=512)(representations, is_training=True)
 
     # for batch in load_cifar10_dataset(
     #    split="train", shuffle=False, apply_augmentations=False, batch_size=8, rng=rng
@@ -609,64 +607,37 @@ def main():
     #    break
 
     img_size = 32
-    batch_size = 8
-    rng1, rng2, rng = jax.random.split(rng, 3)
+    batch_size = 128
+
     batch1 = {
         "image": jnp.array(
             jax.random.uniform(
-                rng1, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+                rng, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
             )
         )
     }
-    batch2 = {
-        "image": jnp.array(
-            jax.random.uniform(
-                rng2, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+    params, state = forward.init(rng, batch1, is_training=True)
+    fast_loss_fn = jax.jit(loss_fn)
+
+    for _ in tqdm(range(1_000)):
+        rng1, rng2, rng = jax.random.split(rng, 3)
+        batch1 = {
+            "image": jnp.array(
+                jax.random.uniform(
+                    rng1, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+                )
             )
-        )
-    }
+        }
+        batch2 = {
+            "image": jnp.array(
+                jax.random.uniform(
+                    rng2, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+                )
+            )
+        }
 
-    forward = hk.transform_with_state(_forward)
-    params_backbone, state_backbone = forward.init(rng, batch)
-    embeddings, _ = forward.apply(params_backbone, state_backbone, rng, batch)
-    print(
-        f"Backbone parameters: {sum(x.size for x in jax.tree_leaves(params_backbone)):,}"
-    )
-    print(f"Backbone output shape: {embeddings.shape}")
+        loss, state = fast_loss_fn(params, state, rng, batch1, batch2)
 
-    project = hk.transform_with_state(_project)
-    params_projector, state_projector = project.init(rng, embeddings)
-    (representation, monitor), _ = project.apply(
-        params_projector, state_projector, rng, embeddings
-    )
-    print(
-        f"Projector parameters: {sum(x.size for x in jax.tree_leaves(params_projector)):,}"
-    )
-    print(f"Projector output shape: {representation.shape}")
-    print(f"Projector monitor output shape: {monitor.shape}")
-    print(f"Projector initial std monitoring value: {monitor.mean()}")
-
-    predict = hk.transform_with_state(_predict)
-    params_predictor, state_predictor = predict.init(rng, representation)
-    (preds, monitor), _ = predict.apply(
-        params_predictor, state_predictor, rng, representation
-    )
-    print(
-        f"Predictor parameters: {sum(x.size for x in jax.tree_leaves(params_predictor)):,}"
-    )
-    print(f"Predictor output shape: {preds.shape}")
-    print(f"Predictor monitor output shape: {monitor.shape}")
-    print(f"Predictor initial std monitoring value: {monitor.mean()}")
-    import ipdb
-
-    ipdb.set_trace()
-    pass
-
-    # fast_forward = jax.jit(forward.apply)
-
-    is_training = True
-    y, state = forward.apply(params, state, rng, batch)
-    print(y.shape)
     import ipdb
 
     ipdb.set_trace()
