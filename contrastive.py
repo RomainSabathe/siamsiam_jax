@@ -593,7 +593,7 @@ def imagenet_preprocessing(x: jnp.array) -> jnp.array:
 def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
     # lhs and rhs are batched.
     lhs = lhs / jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True)
-    rhs = rhs / jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True)
+    rhs = rhs / jnp.linalg.norm(rhs, ord=2, axis=-1, keepdims=True)
 
     return -jnp.sum(lhs * rhs, axis=1).mean()
 
