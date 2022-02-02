@@ -6,9 +6,10 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 
 from collections import defaultdict
 from optparse import Option
-from typing import Mapping, Generator, Callable, Optional, Dict
+from typing import Mapping, Generator, Callable, Optional, Dict, NamedTuple, Tuple
 
 import jax
+import optax
 import numpy as np
 import haiku as hk
 from tqdm import tqdm
@@ -34,6 +35,13 @@ from jax.lib import xla_bridge
 print("jax backend {}".format(xla_bridge.get_backend().platform))
 
 Batch = Mapping[str, np.array]
+Scalars = Mapping[str, jnp.ndarray]
+
+
+class TrainState(NamedTuple):
+    params: hk.Params
+    state: hk.State
+    opt_state: optax.OptState
 
 
 def _forward(batch: Batch, is_training: bool) -> Dict[str, jnp.array]:
@@ -61,7 +69,7 @@ forward = hk.transform_with_state(_forward)
 
 
 def loss_fn(
-    params: hk.Params, state: hk.State, rng, batch1: Batch, batch2: Batch
+    params: hk.Params, state: hk.State, rng: jnp.ndarray, batch1: Batch, batch2: Batch
 ) -> jnp.float32:
     rng1, rng2 = jax.random.split(rng)
 
@@ -72,6 +80,20 @@ def loss_fn(
     p2, z2 = out2["p"], out2["z"]
 
     return (cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0), state
+
+
+def train_step(
+    train_state: TrainState, rng: jnp.ndarray, batch1: Batch, batch2: Batch
+) -> Tuple[TrainState, Scalars]:
+    params, state, opt_state = train_state
+    (loss, new_state), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+        params, state, rng, batch1, batch2
+    )
+
+    updates, new_opt_state = get_optimizer().update(grads, opt_state)
+    new_params = optax.apply_updates(params, updates)
+
+    return TrainState(new_params, new_state, new_opt_state), {"loss": loss}
 
 
 class Cifar10WrappedBatch:
@@ -598,6 +620,11 @@ def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
     return -jnp.sum(lhs * rhs, axis=1).mean()
 
 
+def get_optimizer() -> optax.GradientTransformation:
+    batch_size = 32
+    return optax.sgd(learning_rate=(3e-2 / 256) * batch_size, momentum=0.9)
+
+
 def main():
     rng = jax.random.PRNGKey(42)
 
@@ -607,7 +634,7 @@ def main():
     #    break
 
     img_size = 32
-    batch_size = 128
+    batch_size = 32
 
     batch1 = {
         "image": jnp.array(
@@ -616,8 +643,14 @@ def main():
             )
         )
     }
+
+    # TODO: have a function that returns an initial state.
     params, state = forward.init(rng, batch1, is_training=True)
-    fast_loss_fn = jax.jit(loss_fn)
+    opt_state = get_optimizer().init(params)
+    train_state = TrainState(params, state, opt_state)
+
+    # fast_loss_fn = jax.jit(loss_fn)
+    fast_train_step = jax.jit(train_step)
 
     for _ in tqdm(range(1_000)):
         rng1, rng2, rng = jax.random.split(rng, 3)
@@ -636,7 +669,11 @@ def main():
             )
         }
 
-        loss, state = fast_loss_fn(params, state, rng, batch1, batch2)
+        rng_step, rng = jax.random.split(rng, 2)
+        train_state, loss = fast_train_step(train_state, rng_step, batch1, batch2)
+        # print(loss)
+
+        # loss, state = fast_loss_fn(params, state, rng, batch1, batch2)
 
     import ipdb
 
