@@ -79,6 +79,9 @@ def loss_fn(
     p1, z1 = out1["p"], out1["z"]
     p2, z2 = out2["p"], out2["z"]
 
+    p1 = jax.lax.stop_gradient(p1)
+    p2 = jax.lax.stop_gradient(p2)
+
     return (cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0), state
 
 
