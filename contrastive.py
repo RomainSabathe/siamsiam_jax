@@ -93,7 +93,8 @@ def train_step(
         params, state, rng, batch1, batch2
     )
 
-    updates, new_opt_state = get_optimizer().update(grads, opt_state)
+    batch_size = batch1["image"].shape[0]
+    updates, new_opt_state = get_optimizer(batch_size).update(grads, opt_state)
     new_params = optax.apply_updates(params, updates)
 
     return TrainState(new_params, new_state, new_opt_state), {"loss": loss}
@@ -196,9 +197,10 @@ def load_cifar10_dataset(
                 ),
                 sometimes8(iaa.MultiplyHue((-0.1, 0.1), seed=_convert_seed(hue_seed))),
                 sometimes2(iaa.Grayscale((0, 1), seed=_convert_seed(grayscale_seed))),
-                sometimes2(
-                    iaa.GaussianBlur(sigma=(0.1, 0.5), seed=_convert_seed(blur_seed))
-                ),
+                # Not performed on Cifar experiments
+                #sometimes2(
+                #    iaa.GaussianBlur(sigma=(0.1, 0.5), seed=_convert_seed(blur_seed))
+                #),
             ],
             random_order=True,
             seed=_convert_seed(aug_order_seed),
@@ -623,9 +625,17 @@ def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
     return -jnp.sum(lhs * rhs, axis=1).mean()
 
 
-def get_optimizer() -> optax.GradientTransformation:
-    batch_size = 32
-    return optax.sgd(learning_rate=(3e-2 / 256) * batch_size, momentum=0.9)
+def get_optimizer(batch_size: int) -> optax.GradientTransformation:
+    init_learning_rate = (3e-2 / 256) * batch_size
+    PRE_TRAIN_EPOCHS = 800
+    len_x_train = 45_000
+    PRE_TRAIN_STEPS_PER_EPOCH = len_x_train // batch_size
+
+    schedule = optax.cosine_decay_schedule(
+        init_value=init_learning_rate,
+        decay_steps=PRE_TRAIN_EPOCHS * PRE_TRAIN_STEPS_PER_EPOCH,
+    )
+    return optax.sgd(learning_rate=schedule, momentum=0.9)
 
 
 def main():
@@ -649,7 +659,7 @@ def main():
 
     # TODO: have a function that returns an initial state.
     params, state = forward.init(rng, batch1, is_training=True)
-    opt_state = get_optimizer().init(params)
+    opt_state = get_optimizer(batch_size).init(params)
     train_state = TrainState(params, state, opt_state)
 
     # fast_loss_fn = jax.jit(loss_fn)
