@@ -5,8 +5,19 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 # os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 
 from collections import defaultdict
+
 from optparse import Option
-from typing import Mapping, Generator, Callable, Optional, Dict, NamedTuple, Tuple
+from typing import (
+    Mapping,
+    Generator,
+    Callable,
+    Optional,
+    Dict,
+    NamedTuple,
+    Tuple,
+    Any,
+    Union,
+)
 
 import jax
 import optax
@@ -198,9 +209,9 @@ def load_cifar10_dataset(
                 sometimes8(iaa.MultiplyHue((-0.1, 0.1), seed=_convert_seed(hue_seed))),
                 sometimes2(iaa.Grayscale((0, 1), seed=_convert_seed(grayscale_seed))),
                 # Not performed on Cifar experiments
-                #sometimes2(
+                # sometimes2(
                 #    iaa.GaussianBlur(sigma=(0.1, 0.5), seed=_convert_seed(blur_seed))
-                #),
+                # ),
             ],
             random_order=True,
             seed=_convert_seed(aug_order_seed),
@@ -635,7 +646,26 @@ def get_optimizer(batch_size: int) -> optax.GradientTransformation:
         init_value=init_learning_rate,
         decay_steps=PRE_TRAIN_EPOCHS * PRE_TRAIN_STEPS_PER_EPOCH,
     )
-    return optax.sgd(learning_rate=schedule, momentum=0.9)
+    return sgdw(learning_rate=schedule, weight_decay=5.0e-4, momentum=0.9)
+
+
+def sgdw(
+    learning_rate: optax.ScalarOrSchedule,
+    weight_decay: float = 0.0,
+    weight_decay_mask: Optional[Union[Any, Callable[[optax.base.Params], Any]]] = None,
+    momentum: Optional[float] = None,
+    nesterov: bool = False,
+    accumulator_dtype: Optional[Any] = None,
+):
+    return optax.combine.chain(
+        optax.sgd(
+            learning_rate=learning_rate,
+            momentum=momentum,
+            nesterov=nesterov,
+            accumulator_dtype=accumulator_dtype,
+        ),
+        optax.add_decayed_weights(weight_decay=-weight_decay, mask=weight_decay_mask),
+    )
 
 
 def main():
