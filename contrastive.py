@@ -5,6 +5,7 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 # os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 
 import argparse
+from datetime import datetime
 from collections import defaultdict
 
 from optparse import Option
@@ -50,6 +51,14 @@ print("jax backend {}".format(xla_bridge.get_backend().platform))
 Batch = Mapping[str, np.array]
 Scalars = Mapping[str, jnp.ndarray]
 
+logdir = os.getenv("LOGDIR") or "logs/scalars/" + datetime.now().strftime(
+    "%Y%m%d-%H%M%S"
+)
+file_writer = tf.summary.create_file_writer(logdir + "/metrics")
+file_writer.set_as_default()
+global step
+step = 0
+
 p = argparse.ArgumentParser()
 p.add_argument("--lr-ratio", type=float, default=3e-2 / 256)
 p.add_argument("--pre-train-epochs", type=int, default=800)
@@ -75,14 +84,14 @@ def _forward(batch: Batch, is_training: bool) -> Dict[str, jnp.array]:
 
     feature_maps = backbone(images, is_training=is_training)
     embeddings = jnp.mean(feature_maps, axis=(1, 2))
-    representations, projector_monitor = projector(embeddings, is_training=is_training)
-    predictions, predictor_monitor = predictor(representations, is_training=is_training)
+    representations, std_projector = projector(embeddings, is_training=is_training)
+    predictions, std_predictor = predictor(representations, is_training=is_training)
 
     return {
         "z": representations,
         "p": predictions,
-        "z_monitor": projector_monitor.mean(),
-        "p_monitor": predictor_monitor.mean(),
+        "std_projector": std_projector.mean(),
+        "std_predictor": std_predictor.mean(),
     }
 
 
@@ -103,23 +112,33 @@ def loss_fn(
     p1 = jax.lax.stop_gradient(p1)
     p2 = jax.lax.stop_gradient(p2)
 
-    return (cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0), state
+    extra_metrics = {
+        "std_projector": (out1["std_projector"] * 0.5 + out2["std_projector"]),
+        "std_predictor": (out1["std_predictor"] * 0.5 + out2["std_predictor"]),
+    }
+
+    return (cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0), {
+        "state": state,
+        "extra_metrics": extra_metrics,
+    }
 
 
 def train_step(
     train_state: TrainState, rng: jnp.ndarray, batch1: Batch, batch2: Batch
 ) -> Tuple[TrainState, Scalars]:
     params, state, opt_state = train_state
-    (loss, new_state), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+    (loss, extras), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
         params, state, rng, batch1, batch2
     )
+    new_state = extras["state"]
+    extra_metrics = extras["extra_metrics"]
 
     batch_size = batch1["image"].shape[0]
     # Passing the `params` is necessary to apply weight decay.
     updates, new_opt_state = get_optimizer(batch_size).update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
-    return TrainState(new_params, new_state, new_opt_state), {"loss": loss}
+    return TrainState(new_params, new_state, new_opt_state), {"loss": loss, **extra_metrics}
 
 
 class Cifar10WrappedBatch:
@@ -706,33 +725,37 @@ def main():
     # fast_loss_fn = jax.jit(loss_fn)
     fast_train_step = jax.jit(train_step)
 
-    for _ in tqdm(range(1_000)):
-        rng1, rng2, rng = jax.random.split(rng, 3)
-        batch1 = {
-            "image": jnp.array(
-                jax.random.uniform(
-                    rng1, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+    global step
+    for epoch in tqdm(range(FLAGS.pre_train_epochs)):
+        for _ in tqdm(range(100)):
+            step += 1
+
+            rng1, rng2, rng = jax.random.split(rng, 3)
+            batch1 = {
+                "image": jnp.array(
+                    jax.random.uniform(
+                        rng1, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+                    )
                 )
-            )
-        }
-        batch2 = {
-            "image": jnp.array(
-                jax.random.uniform(
-                    rng2, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+            }
+            batch2 = {
+                "image": jnp.array(
+                    jax.random.uniform(
+                        rng2, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+                    )
                 )
-            )
-        }
+            }
 
-        rng_step, rng = jax.random.split(rng, 2)
-        train_state, loss = fast_train_step(train_state, rng_step, batch1, batch2)
-        # print(loss)
+            rng_step, rng = jax.random.split(rng, 2)
+            train_state, metrics = fast_train_step(train_state, rng_step, batch1, batch2)
+            for metric_name, value in metrics.items():
+                tf.summary.scalar(metric_name, data=float(value), step=step)
+            # print(f"train_loss: {float(metrics['loss'])}")
+            # print(loss)
 
-        # loss, state = fast_loss_fn(params, state, rng, batch1, batch2)
+            # loss, state = fast_loss_fn(params, state, rng, batch1, batch2)
 
-    import ipdb
-
-    ipdb.set_trace()
-    pass
+    return
 
     # dataset_sanity_check(rng, load_cifar10_dataset)
     # compare_augmentations(
