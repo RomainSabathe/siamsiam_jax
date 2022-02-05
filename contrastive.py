@@ -24,6 +24,7 @@ import optax
 import numpy as np
 import haiku as hk
 from tqdm import tqdm
+from optax._src.alias import ScalarOrSchedule
 
 # from PIL import Image
 import jax.numpy as jnp
@@ -105,7 +106,8 @@ def train_step(
     )
 
     batch_size = batch1["image"].shape[0]
-    updates, new_opt_state = get_optimizer(batch_size).update(grads, opt_state)
+    # Passing the `params` is necessary to apply weight decay.
+    updates, new_opt_state = get_optimizer(batch_size).update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
     return TrainState(new_params, new_state, new_opt_state), {"loss": loss}
@@ -650,14 +652,14 @@ def get_optimizer(batch_size: int) -> optax.GradientTransformation:
 
 
 def sgdw(
-    learning_rate: optax.ScalarOrSchedule,
+    learning_rate: ScalarOrSchedule,
     weight_decay: float = 0.0,
-    weight_decay_mask: Optional[Union[Any, Callable[[optax.base.Params], Any]]] = None,
+    weight_decay_mask: Optional[Union[Any, Callable[[optax.Params], Any]]] = None,
     momentum: Optional[float] = None,
     nesterov: bool = False,
     accumulator_dtype: Optional[Any] = None,
 ):
-    return optax.combine.chain(
+    return optax.chain(
         optax.sgd(
             learning_rate=learning_rate,
             momentum=momentum,
