@@ -4,6 +4,7 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 # os.environ["LD_LIBRARY_PATH"] = "/usr/local/cuda/lib64/"
 # os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 
+import argparse
 from collections import defaultdict
 
 from optparse import Option
@@ -48,6 +49,14 @@ print("jax backend {}".format(xla_bridge.get_backend().platform))
 
 Batch = Mapping[str, np.array]
 Scalars = Mapping[str, jnp.ndarray]
+
+p = argparse.ArgumentParser()
+p.add_argument("--lr-ratio", type=float, default=3e-2 / 256)
+p.add_argument("--pre-train-epochs", type=int, default=800)
+p.add_argument("--random-seed", type=int, default=42)
+p.add_argument("--batch-size", type=int, default=32)
+p.add_argument("--weight-decay", type=float, default=5.0e-4)
+FLAGS = p.parse_args()
 
 
 class TrainState(NamedTuple):
@@ -639,8 +648,8 @@ def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
 
 
 def get_optimizer(batch_size: int) -> optax.GradientTransformation:
-    init_learning_rate = (3e-2 / 256) * batch_size
-    PRE_TRAIN_EPOCHS = 800
+    init_learning_rate = FLAGS.lr_ratio * batch_size
+    PRE_TRAIN_EPOCHS = FLAGS.pre_train_epochs
     len_x_train = 45_000
     PRE_TRAIN_STEPS_PER_EPOCH = len_x_train // batch_size
 
@@ -648,7 +657,7 @@ def get_optimizer(batch_size: int) -> optax.GradientTransformation:
         init_value=init_learning_rate,
         decay_steps=PRE_TRAIN_EPOCHS * PRE_TRAIN_STEPS_PER_EPOCH,
     )
-    return sgdw(learning_rate=schedule, weight_decay=5.0e-4, momentum=0.9)
+    return sgdw(learning_rate=schedule, weight_decay=FLAGS.weight_decay, momentum=0.9)
 
 
 def sgdw(
@@ -671,7 +680,7 @@ def sgdw(
 
 
 def main():
-    rng = jax.random.PRNGKey(42)
+    rng = jax.random.PRNGKey(FLAGS.random_seed)
 
     # for batch in load_cifar10_dataset(
     #    split="train", shuffle=False, apply_augmentations=False, batch_size=8, rng=rng
@@ -679,7 +688,7 @@ def main():
     #    break
 
     img_size = 32
-    batch_size = 32
+    batch_size = FLAGS.batch_size
 
     batch1 = {
         "image": jnp.array(
