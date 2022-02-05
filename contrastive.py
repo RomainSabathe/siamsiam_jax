@@ -28,20 +28,18 @@ import haiku as hk
 from tqdm import tqdm
 from optax._src.alias import ScalarOrSchedule
 
-# from PIL import Image
+from PIL import Image
 import jax.numpy as jnp
 
 import tensorflow as tf
 
-# gpus = tf.config.list_physical_devices('GPU')
 tf.config.set_visible_devices([], "GPU")
 gpus = tf.config.get_visible_devices("GPU")
-# from einops import rearrange
-# from tabulate import tabulate
-# import imgaug.augmenters as iaa
+from einops import rearrange
+from tabulate import tabulate
+#import imgaug.augmenters as iaa
 
-# tf.config.set_visible_devices([], device_type="GPU")  # make sure TF doesn't use GPU.
-# import tensorflow_datasets as tfds
+import tensorflow_datasets as tfds
 
 print("jax version {}".format(jax.__version__))
 from jax.lib import xla_bridge
@@ -138,7 +136,10 @@ def train_step(
     updates, new_opt_state = get_optimizer(batch_size).update(grads, opt_state, params)
     new_params = optax.apply_updates(params, updates)
 
-    return TrainState(new_params, new_state, new_opt_state), {"loss": loss, **extra_metrics}
+    return TrainState(new_params, new_state, new_opt_state), {
+        "loss": loss,
+        **extra_metrics,
+    }
 
 
 class Cifar10WrappedBatch:
@@ -351,12 +352,12 @@ def make_augmented_dataset(
         "rng",
         "data_order_rng",
         "augmentation_rng",
-        "apply_augmentations",
+        #"apply_augmentations",
         "as_numpy",
     ]:
         if key in kwargs:
             kwargs.pop(key)
-    kwargs["apply_augmentations"] = True
+    #kwargs["apply_augmentations"] = True
     kwargs["data_order_rng"] = data_order_rng
     kwargs["as_numpy"] = False
 
@@ -368,14 +369,12 @@ def make_augmented_dataset(
             tf.math.reduce_all(tf.equal(batch1["label"], batch2["label"])), True
         )
         tf.assert_equal(tf.math.reduce_all(tf.equal(batch1["id"], batch2["id"])), True)
-        return {
-            "id": batch1["id"],
-            "label": batch1["label"],
-            "image1": batch1["image"],
-            "image2": batch2["image"],
-        }
+        # The "id" key holds strings, which JAX is not happy about apparently.
+        batch1.pop("id")
+        batch2.pop("id")
+        return batch1, batch2
 
-    return tf.data.Dataset.zip((dataset1, dataset2)).map(sanity_check)
+    return tf.data.Dataset.zip((dataset1, dataset2)).map(sanity_check).as_numpy_iterator()
 
 
 class ResNet18(hk.Module):
@@ -663,7 +662,7 @@ def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
     lhs = lhs / jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True)
     rhs = rhs / jnp.linalg.norm(rhs, ord=2, axis=-1, keepdims=True)
 
-    return -jnp.sum(lhs * rhs, axis=1).mean()
+    return jnp.sum(lhs * rhs, axis=1).mean()
 
 
 def get_optimizer(batch_size: int) -> optax.GradientTransformation:
@@ -673,7 +672,9 @@ def get_optimizer(batch_size: int) -> optax.GradientTransformation:
     PRE_TRAIN_STEPS_PER_EPOCH = len_x_train // batch_size
 
     schedule = optax.cosine_decay_schedule(
-        init_value=init_learning_rate,
+        # We give a negative learning rate to perform gradient ascent
+        # on the cosine distance.
+        init_value=-init_learning_rate,
         decay_steps=PRE_TRAIN_EPOCHS * PRE_TRAIN_STEPS_PER_EPOCH,
     )
     return sgdw(learning_rate=schedule, weight_decay=FLAGS.weight_decay, momentum=0.9)
@@ -727,64 +728,53 @@ def main():
 
     global step
     for epoch in tqdm(range(FLAGS.pre_train_epochs)):
-        for _ in tqdm(range(100)):
+        rng_dataset, rng = jax.random.split(rng, 2)
+        for batch1, batch2 in tqdm(
+            make_augmented_dataset(
+                load_cifar10_dataset,
+                rng=rng_dataset,
+                split="train",
+                batch_size=FLAGS.batch_size,
+                shuffle=True,
+                apply_augmentations=False,
+            )
+        ):
+            # for _ in tqdm(range(100)):
             step += 1
 
-            rng1, rng2, rng = jax.random.split(rng, 3)
-            batch1 = {
-                "image": jnp.array(
-                    jax.random.uniform(
-                        rng1, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
-                    )
-                )
-            }
-            batch2 = {
-                "image": jnp.array(
-                    jax.random.uniform(
-                        rng2, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
-                    )
-                )
-            }
+            # rng1, rng2, rng = jax.random.split(rng, 3)
+            # batch1 = {
+            #    "image": jnp.array(
+            #        jax.random.uniform(
+            #            rng1, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+            #        )
+            #    )
+            # }
+            # batch2 = {
+            #    "image": jnp.array(
+            #        jax.random.uniform(
+            #            rng2, [batch_size, img_size, img_size, 3], jnp.float32, 0, 255
+            #        )
+            #    )
+            # }
 
             rng_step, rng = jax.random.split(rng, 2)
-            train_state, metrics = fast_train_step(train_state, rng_step, batch1, batch2)
+            train_state, metrics = fast_train_step(
+                train_state, rng_step, batch1, batch2
+            )
             for metric_name, value in metrics.items():
                 tf.summary.scalar(metric_name, data=float(value), step=step)
-            # print(f"train_loss: {float(metrics['loss'])}")
-            # print(loss)
-
-            # loss, state = fast_loss_fn(params, state, rng, batch1, batch2)
 
     return
 
-    # dataset_sanity_check(rng, load_cifar10_dataset)
-    # compare_augmentations(
-    #     load_cifar10_dataset, save_path="/mnt/c/Users/Romain/Desktop/img.png"
-    # )
-    for batch in tqdm(
-        make_augmented_dataset(
-            load_cifar10_dataset,
-            rng=rng,
-            split="train",
-            batch_size=2 ** 8,
-            shuffle=True,
-        )
-    ):
-        continue
-        save_path = "/mnt/c/Users/Romain/Desktop/haha.png"
-        imgs1 = batch["image1"]
-        imgs2 = batch["image2"]
-        size = 8
-        imgs = np.stack([imgs1, imgs2], axis=0)
-        imgs = rearrange(imgs, "n (b1 b2) h w c -> (b1 h) (b2 n w) c", b1=size, b2=size)
-        imgs = np.array(imgs)
-        Image.fromarray(imgs).save(save_path)
 
-        import ipdb
-
-        ipdb.set_trace()
-        pass
+def dataset_checks():
+    dataset_sanity_check(rng, load_cifar10_dataset)
+    compare_augmentations(
+        load_cifar10_dataset, save_path="/mnt/c/Users/Romain/Desktop/img.png"
+    )
 
 
 if __name__ == "__main__":
+    # dataset_checks()
     main()
