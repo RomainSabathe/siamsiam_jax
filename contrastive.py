@@ -1,10 +1,12 @@
 import os
+from zlib import Z_BEST_SPEED
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 # os.environ["LD_LIBRARY_PATH"] = "/usr/local/cuda/lib64/"
 # os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 
 import argparse
+from functools import partial
 from datetime import datetime
 from collections import defaultdict
 
@@ -37,7 +39,8 @@ tf.config.set_visible_devices([], "GPU")
 gpus = tf.config.get_visible_devices("GPU")
 from einops import rearrange
 from tabulate import tabulate
-#import imgaug.augmenters as iaa
+
+import imgaug.augmenters as iaa
 
 import tensorflow_datasets as tfds
 
@@ -63,6 +66,7 @@ p.add_argument("--pre-train-epochs", type=int, default=800)
 p.add_argument("--random-seed", type=int, default=42)
 p.add_argument("--batch-size", type=int, default=32)
 p.add_argument("--weight-decay", type=float, default=5.0e-4)
+p.add_argument("--debug", action="store_true", default=False)
 FLAGS = p.parse_args()
 
 
@@ -70,6 +74,12 @@ class TrainState(NamedTuple):
     params: hk.Params
     state: hk.State
     opt_state: optax.OptState
+
+
+class Index(NamedTuple):
+    zs: jnp.array
+    ps: jnp.array
+    labels: jnp.array
 
 
 def _forward(batch: Batch, is_training: bool) -> Dict[str, jnp.array]:
@@ -81,19 +91,35 @@ def _forward(batch: Batch, is_training: bool) -> Dict[str, jnp.array]:
     predictor = Predictor(hidden_dims=512)
 
     feature_maps = backbone(images, is_training=is_training)
-    embeddings = jnp.mean(feature_maps, axis=(1, 2))
-    representations, std_projector = projector(embeddings, is_training=is_training)
-    predictions, std_predictor = predictor(representations, is_training=is_training)
+    h = jnp.mean(feature_maps, axis=(1, 2))
+    z, std_projector = projector(h, is_training=is_training)
+    p, std_predictor = predictor(z, is_training=is_training)
 
     return {
-        "z": representations,
-        "p": predictions,
+        "z": z,
+        "p": p,
         "std_projector": std_projector.mean(),
         "std_predictor": std_predictor.mean(),
     }
 
 
 forward = hk.transform_with_state(_forward)
+fast_forward_eval = jax.jit(partial(forward.apply, is_training=False))
+
+
+def cosine_distance_solo(lhs, rhs, eps=1e-8):
+    lhs = lhs / (jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True) + eps)
+    rhs = rhs / (jnp.linalg.norm(rhs, ord=2, axis=-1, keepdims=True) + eps)
+
+    return jnp.sum(lhs * rhs)
+
+
+dist_fn = jax.vmap(
+    jax.vmap(cosine_distance_solo, in_axes=(None, 0), out_axes=0),
+    in_axes=(0, None),
+    out_axes=0,
+)
+fast_dist_fn = jax.jit(dist_fn)
 
 
 def loss_fn(
@@ -107,15 +133,17 @@ def loss_fn(
     p1, z1 = out1["p"], out1["z"]
     p2, z2 = out2["p"], out2["z"]
 
-    p1 = jax.lax.stop_gradient(p1)
-    p2 = jax.lax.stop_gradient(p2)
+    z1 = jax.lax.stop_gradient(z1)
+    z2 = jax.lax.stop_gradient(z2)
 
     extra_metrics = {
         "std_projector": (out1["std_projector"] * 0.5 + out2["std_projector"]),
         "std_predictor": (out1["std_predictor"] * 0.5 + out2["std_predictor"]),
     }
 
-    return (cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0), {
+    # I do 1 - cosine_dist to mimick the behaviour of TF Similarity.
+    loss = 1 - ((cosine_distance(p1, z2) / 2.0) + (cosine_distance(p2, z1) / 2.0))
+    return loss, {
         "state": state,
         "extra_metrics": extra_metrics,
     }
@@ -263,7 +291,11 @@ def load_cifar10_dataset(
 
         dataset = dataset.map(transform_batch_fn)
 
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    def remove_id(batch):
+        batch.pop("id")
+        return batch
+
+    dataset = dataset.map(remove_id).prefetch(tf.data.AUTOTUNE)
     if as_numpy:
         dataset = tfds.as_numpy(dataset)
     return dataset
@@ -352,12 +384,10 @@ def make_augmented_dataset(
         "rng",
         "data_order_rng",
         "augmentation_rng",
-        #"apply_augmentations",
         "as_numpy",
     ]:
         if key in kwargs:
             kwargs.pop(key)
-    #kwargs["apply_augmentations"] = True
     kwargs["data_order_rng"] = data_order_rng
     kwargs["as_numpy"] = False
 
@@ -368,13 +398,11 @@ def make_augmented_dataset(
         tf.assert_equal(
             tf.math.reduce_all(tf.equal(batch1["label"], batch2["label"])), True
         )
-        tf.assert_equal(tf.math.reduce_all(tf.equal(batch1["id"], batch2["id"])), True)
-        # The "id" key holds strings, which JAX is not happy about apparently.
-        batch1.pop("id")
-        batch2.pop("id")
         return batch1, batch2
 
-    return tf.data.Dataset.zip((dataset1, dataset2)).map(sanity_check).as_numpy_iterator()
+    return (
+        tf.data.Dataset.zip((dataset1, dataset2)).map(sanity_check).as_numpy_iterator()
+    )
 
 
 class ResNet18(hk.Module):
@@ -657,10 +685,10 @@ def imagenet_preprocessing(x: jnp.array) -> jnp.array:
     return x
 
 
-def cosine_distance(lhs: jnp.array, rhs: jnp.array) -> jnp.array:
+def cosine_distance(lhs: jnp.array, rhs: jnp.array, eps: float = 1e-8) -> jnp.array:
     # lhs and rhs are batched.
-    lhs = lhs / jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True)
-    rhs = rhs / jnp.linalg.norm(rhs, ord=2, axis=-1, keepdims=True)
+    lhs = lhs / (jnp.linalg.norm(lhs, ord=2, axis=-1, keepdims=True) + eps)
+    rhs = rhs / (jnp.linalg.norm(rhs, ord=2, axis=-1, keepdims=True) + eps)
 
     return jnp.sum(lhs * rhs, axis=1).mean()
 
@@ -672,9 +700,7 @@ def get_optimizer(batch_size: int) -> optax.GradientTransformation:
     PRE_TRAIN_STEPS_PER_EPOCH = len_x_train // batch_size
 
     schedule = optax.cosine_decay_schedule(
-        # We give a negative learning rate to perform gradient ascent
-        # on the cosine distance.
-        init_value=-init_learning_rate,
+        init_value=init_learning_rate,
         decay_steps=PRE_TRAIN_EPOCHS * PRE_TRAIN_STEPS_PER_EPOCH,
     )
     return sgdw(learning_rate=schedule, weight_decay=FLAGS.weight_decay, momentum=0.9)
@@ -699,13 +725,43 @@ def sgdw(
     )
 
 
+def build_index(params, state, rng, dataset):
+    zs, ps, labels = [], [], []
+    for batch in tqdm(dataset):
+        out, _ = fast_forward_eval(params, state, rng, batch)
+        zs.append(out["z"])
+        ps.append(out["p"])
+        labels.append(batch["label"])
+
+        if FLAGS.debug:
+            break
+
+    return Index(
+        jnp.concatenate(zs, 0), jnp.concatenate(ps, 0), jnp.concatenate(labels, 0)
+    )
+
+
+def evaluate(params, state, rng, dataset_factory) -> float:
+    rng_dataset, rng = jax.random.split(rng, 2)  # Not stricly necessary
+    index = build_index(params, state, rng, dataset_factory(split="index", rng=rng_dataset))
+    query = build_index(params, state, rng, dataset_factory(split="query", rng=rng_dataset))
+
+    dists = fast_dist_fn(query.zs, index.zs)
+    matches = jnp.argmin(dists, axis=1)
+    accuracy_projector = jnp.mean(query.labels == index.labels[matches])
+
+    dists = fast_dist_fn(query.zs, index.zs)
+    matches = jnp.argmin(dists, axis=1)
+    accuracy_predictor = jnp.mean(query.labels == index.labels[matches])
+
+    return {
+        "accuracy_projector": accuracy_projector,
+        "accuracy_predictor": accuracy_predictor,
+    }
+
+
 def main():
     rng = jax.random.PRNGKey(FLAGS.random_seed)
-
-    # for batch in load_cifar10_dataset(
-    #    split="train", shuffle=False, apply_augmentations=False, batch_size=8, rng=rng
-    # ):
-    #    break
 
     img_size = 32
     batch_size = FLAGS.batch_size
@@ -719,15 +775,15 @@ def main():
     }
 
     # TODO: have a function that returns an initial state.
+    # is_training=True is necessary to initialize the batch norm stats.
     params, state = forward.init(rng, batch1, is_training=True)
     opt_state = get_optimizer(batch_size).init(params)
     train_state = TrainState(params, state, opt_state)
 
-    # fast_loss_fn = jax.jit(loss_fn)
     fast_train_step = jax.jit(train_step)
 
     global step
-    for epoch in tqdm(range(FLAGS.pre_train_epochs)):
+    for epoch in tqdm(range(FLAGS.pre_train_epochs if not FLAGS.debug else 1)):
         rng_dataset, rng = jax.random.split(rng, 2)
         for batch1, batch2 in tqdm(
             make_augmented_dataset(
@@ -736,10 +792,9 @@ def main():
                 split="train",
                 batch_size=FLAGS.batch_size,
                 shuffle=True,
-                apply_augmentations=False,
+                apply_augmentations=True,
             )
         ):
-            # for _ in tqdm(range(100)):
             step += 1
 
             # rng1, rng2, rng = jax.random.split(rng, 3)
@@ -763,9 +818,24 @@ def main():
                 train_state, rng_step, batch1, batch2
             )
             for metric_name, value in metrics.items():
-                tf.summary.scalar(metric_name, data=float(value), step=step)
+                tf.summary.scalar(f"train_{metric_name}", data=float(value), step=step)
 
-    return
+            if step == 10 and FLAGS.debug:
+                break
+
+        val_metrics = evaluate(
+            params,
+            state,
+            rng,
+            dataset_factory=partial(
+                load_cifar10_dataset,
+                shuffle=False,
+                apply_augmentations=False,
+                batch_size=128 if not FLAGS.debug else 16,
+            ),
+        )
+        for metric_name, value in val_metrics.items():
+            tf.summary.scalar(f"val_{metric_name}", data=float(value), step=step)
 
 
 def dataset_checks():

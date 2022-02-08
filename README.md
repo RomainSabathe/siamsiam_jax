@@ -1,1 +1,1 @@
-# siamsiam_jax
+# simsiam_jax
