@@ -741,7 +741,9 @@ def build_index(params, state, rng, dataset):
     )
 
 
-def evaluate(params, state, rng, dataset_factory) -> float:
+def evaluate(train_state, rng, dataset_factory) -> float:
+    params, state, _ = train_state
+
     rng_dataset, rng = jax.random.split(rng, 2)  # Not stricly necessary
     index = build_index(params, state, rng, dataset_factory(split="index", rng=rng_dataset))
     query = build_index(params, state, rng, dataset_factory(split="query", rng=rng_dataset))
@@ -824,8 +826,7 @@ def main():
                 break
 
         val_metrics = evaluate(
-            params,
-            state,
+            train_state,
             rng,
             dataset_factory=partial(
                 load_cifar10_dataset,
