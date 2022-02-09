@@ -29,11 +29,11 @@ from optax._src.alias import ScalarOrSchedule
 tf.config.set_visible_devices([], "GPU")
 gpus = tf.config.get_visible_devices("GPU")
 
-from .data.utils import Batch, Scalars
-from .data.cifar10 import load_cifar10_dataset
-from .data.contrastive import make_augmented_dataset
-from .data.preprocessing import imagenet_preprocessing
-from .architectures import ResNet18Sim, Projector, Predictor
+from data.utils import Batch, Scalars
+from data.cifar10 import load_cifar10_dataset
+from data.contrastive import make_augmented_dataset
+from data.preprocessing import imagenet_preprocessing
+from architectures import ResNet18Sim, Projector, Predictor
 
 print("jax version {}".format(jax.__version__))
 from jax.lib import xla_bridge
