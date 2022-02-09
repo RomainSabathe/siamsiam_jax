@@ -282,7 +282,7 @@ def main():
     params, state = forward.init(rng, batch1, is_training=True)
     opt_state = get_optimizer(batch_size).init(params)
     train_state = TrainState(params, state, opt_state)
-
+        
     fast_train_step = jax.jit(train_step)
 
     global step
