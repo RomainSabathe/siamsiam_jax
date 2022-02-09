@@ -6,10 +6,12 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 # os.environ["XLA_FLAGS"] = "--xla_gpu_strict_conv_algorithm_picker=false"
 
 import argparse
+from pathlib import Path
 from functools import partial
 from datetime import datetime
 from collections import defaultdict
 
+import pickle
 from optparse import Option
 from typing import (
     Mapping,
@@ -28,6 +30,7 @@ import optax
 import numpy as np
 import haiku as hk
 from tqdm import tqdm
+from jax.tree_util import PyTreeDef
 from optax._src.alias import ScalarOrSchedule
 
 from PIL import Image
@@ -59,6 +62,34 @@ file_writer = tf.summary.create_file_writer(logdir + "/metrics")
 file_writer.set_as_default()
 global step
 step = 0
+
+def save_pytree(data: PyTreeDef, path: Union[str, Path], overwrite: bool = False):
+    suffix = ".pickle"
+
+    path = Path(path)
+    if path.suffix != suffix:
+        path = path.with_suffix(suffix)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if overwrite:
+            path.unlink()
+        else:
+            raise RuntimeError(f'File {path} already exists.')
+    with open(path, 'wb') as file:
+        pickle.dump(data, file)
+
+
+def load_pytree(path: Union[str, Path]) -> PyTreeDef:
+    suffix = ".pickle"
+
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError(f'Not a file: {path}')
+    if path.suffix != suffix:
+        raise ValueError(f'Not a {suffix} file: {path}')
+    with open(path, 'rb') as file:
+        data = pickle.load(file)
+    return data
 
 p = argparse.ArgumentParser()
 p.add_argument("--lr-ratio", type=float, default=3e-2 / 256)
@@ -837,6 +868,7 @@ def main():
         )
         for metric_name, value in val_metrics.items():
             tf.summary.scalar(f"val_{metric_name}", data=float(value), step=step)
+        save_pytree(train_state, path=Path(logdir) / "train_state.pikle", overwrite=True)
 
 
 def dataset_checks():
