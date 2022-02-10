@@ -21,13 +21,12 @@ import jax
 import optax
 import haiku as hk
 from tqdm import tqdm
-import tensorflow as tf
 import jax.numpy as jnp
 from jax.tree_util import PyTreeDef
 from optax._src.alias import ScalarOrSchedule
 
+import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
-gpus = tf.config.get_visible_devices("GPU")
 
 from data.utils import Batch, Scalars
 from data.cifar10 import load_cifar10_dataset
@@ -35,10 +34,8 @@ from data.contrastive import make_augmented_dataset
 from data.preprocessing import imagenet_preprocessing
 from architectures import ResNet18Sim, Projector, Predictor
 
-print("jax version {}".format(jax.__version__))
-from jax.lib import xla_bridge
-
-print("jax backend {}".format(xla_bridge.get_backend().platform))
+print("jax version: {}".format(jax.__version__))
+print("jax backend: {}".format(jax.lib.xla_bridge.get_backend().platform))
 
 logdir = os.getenv("LOGDIR") or "logs/scalars/" + datetime.now().strftime(
     "%Y%m%d-%H%M%S"
@@ -153,8 +150,8 @@ def loss_fn(
     z2 = jax.lax.stop_gradient(z2)
 
     extra_metrics = {
-        "std_projector": (out1["std_projector"] * 0.5 + out2["std_projector"]),
-        "std_predictor": (out1["std_predictor"] * 0.5 + out2["std_predictor"]),
+        "std_projector": (out1["std_projector"] * 0.5 + out2["std_projector"] * 0.5),
+        "std_predictor": (out1["std_predictor"] * 0.5 + out2["std_predictor"] * 0.5),
     }
 
     # I do 1 - cosine_dist to mimick the behaviour of TF Similarity.

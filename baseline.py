@@ -12,9 +12,7 @@ import jax.numpy as jnp
 from tqdm import tqdm
 
 import tensorflow as tf
-
 tf.config.set_visible_devices([], "GPU")
-gpus = tf.config.get_visible_devices("GPU")
 
 from architectures import ResNet18Sim
 from data.utils import Batch
@@ -72,7 +70,7 @@ def loss_fn(params, state, batch: Batch) -> jnp.array:
 def train_step(train_state, batch: Batch):
     params, state, opt_state = train_state
 
-    (loss, state), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
+    (loss, new_state), grads = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)(
         params, state, batch
     )
 
@@ -80,7 +78,7 @@ def train_step(train_state, batch: Batch):
     updates, new_opt_state = get_optimizer(batch_size).update(grads, opt_state)
     new_params = optax.apply_updates(params, updates)
 
-    return TrainState(new_params, state, new_opt_state), loss
+    return TrainState(new_params, new_state, new_opt_state), loss
 
 
 def get_optimizer(batch_size: int):
@@ -104,6 +102,7 @@ def main():
     fast_train_step = jax.jit(train_step)
 
     global step
+    epoch = 0
     for batch in tqdm(
         load_cifar10_dataset(
             split="train",
@@ -129,6 +128,7 @@ def main():
                 ),
             )
             tf.summary.scalar(f"val_accuracy", data=float(accuracy), step=step)
+            epoch += 1
 
 
 if __name__ == "__main__":
