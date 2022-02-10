@@ -1,4 +1,5 @@
 import os
+from functools import partial
 from typing import NamedTuple
 from datetime import datetime
 
@@ -46,6 +47,19 @@ def _forward(batch: Batch, is_training: bool) -> jnp.array:
 
 
 forward = hk.transform_with_state(_forward)
+jit_forward_eval = jax.jit(partial(forward.apply, is_training=False))
+
+
+def eval_step(train_state, dataset_iterator):
+    preds_are_correct = []
+
+    params, state, _ = train_state
+    for batch in tqdm(dataset_iterator):
+        logits, _ = jit_forward_eval(params, state, None, batch)
+        preds = jnp.argmax(logits, axis=-1)
+        preds_are_correct.append(preds == batch["label"])
+
+    return jnp.mean(jnp.concatenate(preds_are_correct, axis=0))
 
 
 def loss_fn(params, state, batch: Batch) -> jnp.array:
@@ -70,7 +84,7 @@ def train_step(train_state, batch: Batch):
 
 
 def get_optimizer(batch_size: int):
-    base_learning_rate = 3e-3 / 128.0
+    base_learning_rate = 1e-2 / 128.0
     learning_rate = base_learning_rate * batch_size
     # schedule = optax.cosine_delay_schedule(init_value=learning_rate, decay_steps=1_000)
     return optax.adam(learning_rate=learning_rate)
@@ -79,6 +93,7 @@ def get_optimizer(batch_size: int):
 def main():
     rng = jax.random.PRNGKey(42)
     batch_size = 128
+    validate_every = int(352 * 128 / batch_size)
 
     params, state = forward.init(
         rng, {"image": jnp.ones((1, 32, 32, 3), dtype=jnp.uint8)}, is_training=True
@@ -89,19 +104,31 @@ def main():
     fast_train_step = jax.jit(train_step)
 
     global step
-    for epoch in range(10):
-        for batch in tqdm(
-            load_cifar10_dataset(
-                split="train",
-                shuffle=True,
-                apply_augmentations=False,
-                batch_size=batch_size,
-                rng=rng,
+    for batch in tqdm(
+        load_cifar10_dataset(
+            split="train",
+            shuffle=True,
+            apply_augmentations=True,
+            batch_size=batch_size,
+            rng=rng,
+        )
+    ):
+        train_state, loss = fast_train_step(train_state, batch)
+        step += 1
+        tf.summary.scalar(f"train_loss", data=float(loss), step=step)
+
+        if step % validate_every == 0:
+            accuracy = eval_step(
+                train_state,
+                load_cifar10_dataset(
+                    split="val",
+                    shuffle=False,
+                    apply_augmentations=False,
+                    batch_size=batch_size,
+                    rng=rng,
+                ),
             )
-        ):
-            train_state, loss = fast_train_step(train_state, batch)
-            step += 1
-            tf.summary.scalar(f"train_loss", data=float(loss), step=step)
+            tf.summary.scalar(f"val_accuracy", data=float(accuracy), step=step)
 
 
 if __name__ == "__main__":
