@@ -146,7 +146,7 @@ def load_cifar10_dataset(
         batch.pop("id")
         return batch
 
-    dataset = dataset.map(remove_id).repeat(10).prefetch(tf.data.AUTOTUNE)
+    dataset = dataset.map(remove_id).prefetch(tf.data.AUTOTUNE)
     if as_numpy:
         dataset = tfds.as_numpy(dataset)
     return dataset
