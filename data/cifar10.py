@@ -39,6 +39,7 @@ def load_cifar10_dataset(
     data_order_rng: Optional[jnp.array] = None,
     augmentation_rng: Optional[jnp.array] = None,
     as_numpy: bool = True,
+    debug: bool = False,
 ) -> Generator[Cifar10WrappedBatch, None, None]:
     if rng is None and (data_order_rng is None and augmentation_rng is None):
         raise Exception(
@@ -56,6 +57,13 @@ def load_cifar10_dataset(
     }[split]
 
     dataset = tfds.load("cifar10", split=split)
+    if debug:
+        # Only keeping classes 0 and 1 for faster training.
+        dataset = dataset.filter(
+            lambda sample: tf.math.logical_or(
+                tf.math.equal(sample["label"], 0), tf.math.equal(sample["label"], 1)
+            )
+        )
     if shuffle:
         dataset = dataset.shuffle(batch_size * 10, seed=int(data_order_rng[1]))
 

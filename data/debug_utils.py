@@ -22,7 +22,7 @@ def dataset_sanity_check(rng: jnp.array, dataset_loading_fn, num_batches: int = 
     statistics = {split: defaultdict(lambda: 0) for split in splits}
 
     for split in tqdm(splits):
-        ds = dataset_loading_fn(rng, split=split, batch_size=1_024)
+        ds = dataset_loading_fn(rng=rng, split=split, batch_size=1_024)
         for i, batch in enumerate(ds):
             if num_batches > 0 and i >= num_batches:
                 break
@@ -88,7 +88,6 @@ def compare_augmentations(
     imgs = rearrange(imgs, "n (b1 b2) h w c -> (b1 h) (b2 n w) c", b1=size, b2=size)
     imgs = np.array(imgs)
     Image.fromarray(imgs).save(save_path)
-
 
 
 def dataset_checks(rng: jnp.array):

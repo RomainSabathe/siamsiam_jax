@@ -1,4 +1,5 @@
 import os
+
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.7"
 
 import argparse
@@ -7,15 +8,7 @@ from functools import partial
 from datetime import datetime
 
 import pickle
-from typing import (
-    Callable,
-    Optional,
-    Dict,
-    NamedTuple,
-    Tuple,
-    Any,
-    Union
-)
+from typing import Callable, Optional, Dict, NamedTuple, Tuple, Any, Union
 
 import jax
 import optax
@@ -26,6 +19,7 @@ from jax.tree_util import PyTreeDef
 from optax._src.alias import ScalarOrSchedule
 
 import tensorflow as tf
+
 tf.config.set_visible_devices([], "GPU")
 
 from data.utils import Batch, Scalars
@@ -45,6 +39,7 @@ file_writer.set_as_default()
 global step
 step = 0
 
+
 def save_pytree(data: PyTreeDef, path: Union[str, Path], overwrite: bool = False):
     suffix = ".pickle"
 
@@ -56,8 +51,8 @@ def save_pytree(data: PyTreeDef, path: Union[str, Path], overwrite: bool = False
         if overwrite:
             path.unlink()
         else:
-            raise RuntimeError(f'File {path} already exists.')
-    with open(path, 'wb') as file:
+            raise RuntimeError(f"File {path} already exists.")
+    with open(path, "wb") as file:
         pickle.dump(data, file)
 
 
@@ -66,12 +61,13 @@ def load_pytree(path: Union[str, Path]) -> PyTreeDef:
 
     path = Path(path)
     if not path.is_file():
-        raise ValueError(f'Not a file: {path}')
+        raise ValueError(f"Not a file: {path}")
     if path.suffix != suffix:
-        raise ValueError(f'Not a {suffix} file: {path}')
-    with open(path, 'rb') as file:
+        raise ValueError(f"Not a {suffix} file: {path}")
+    with open(path, "rb") as file:
         data = pickle.load(file)
     return data
+
 
 p = argparse.ArgumentParser()
 p.add_argument("--lr-ratio", type=float, default=3e-2 / 256)
@@ -79,6 +75,7 @@ p.add_argument("--pre-train-epochs", type=int, default=800)
 p.add_argument("--random-seed", type=int, default=42)
 p.add_argument("--batch-size", type=int, default=32)
 p.add_argument("--weight-decay", type=float, default=5.0e-4)
+p.add_argument("--binary-task", action="store_true", default=False)
 p.add_argument("--debug", action="store_true", default=False)
 FLAGS = p.parse_args()
 
@@ -243,8 +240,12 @@ def evaluate(train_state, rng, dataset_factory) -> float:
     params, state, _ = train_state
 
     rng_dataset, rng = jax.random.split(rng, 2)  # Not stricly necessary
-    index = build_index(params, state, rng, dataset_factory(split="index", rng=rng_dataset))
-    query = build_index(params, state, rng, dataset_factory(split="query", rng=rng_dataset))
+    index = build_index(
+        params, state, rng, dataset_factory(split="index", rng=rng_dataset)
+    )
+    query = build_index(
+        params, state, rng, dataset_factory(split="query", rng=rng_dataset)
+    )
 
     dists = fast_dist_fn(query.zs, index.zs)
     matches = jnp.argmin(dists, axis=1)
@@ -279,7 +280,7 @@ def main():
     params, state = forward.init(rng, batch1, is_training=True)
     opt_state = get_optimizer(batch_size).init(params)
     train_state = TrainState(params, state, opt_state)
-        
+
     fast_train_step = jax.jit(train_step)
 
     global step
@@ -293,6 +294,7 @@ def main():
                 batch_size=FLAGS.batch_size,
                 shuffle=True,
                 apply_augmentations=True,
+                debug=FLAGS.binary_task,
             )
         ):
             step += 1
@@ -331,11 +333,14 @@ def main():
                 shuffle=False,
                 apply_augmentations=False,
                 batch_size=128 if not FLAGS.debug else 16,
+                debug=FLAGS.binary_task,
             ),
         )
         for metric_name, value in val_metrics.items():
             tf.summary.scalar(f"val_{metric_name}", data=float(value), step=step)
-        save_pytree(train_state, path=Path(logdir) / "train_state.pikle", overwrite=True)
+        save_pytree(
+            train_state, path=Path(logdir) / "train_state.pikle", overwrite=True
+        )
 
 
 if __name__ == "__main__":

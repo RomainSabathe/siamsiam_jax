@@ -11,8 +11,10 @@ import haiku as hk
 import jax.numpy as jnp
 from tqdm import tqdm
 
+# fmt: off
 import tensorflow as tf
 tf.config.set_visible_devices([], "GPU")
+# fmt: on
 
 from architectures import ResNet18Sim
 from data.utils import Batch
